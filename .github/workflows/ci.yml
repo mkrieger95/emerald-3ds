@@ -92,32 +92,26 @@ jobs:
       matrix:
         include:
           - name: baseline
-            python-version: "3.13"
-            python-image: python:3.13.17-slim-bookworm
+            pillow: "12.3.0"
           - name: candidate
-            python-version: "3.15"
-            python-image: python:3.15.2-slim-bookworm
+            pillow: "13.0.0"
     # Not ubuntu-latest: on Ubuntu 26.04 the container's AddressSanitizer
     # builds (pokedex_capture_test.py --sanitize) loop on DEADLYSIGNAL until
     # the runner is lost.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Select the comparison interpreter
+      - name: Select the comparison Pillow version
         env:
-          TRIAL_PYTHON_VERSION: ${{ matrix.python-version }}
-          TRIAL_PYTHON_IMAGE: ${{ matrix.python-image }}
+          TRIAL_PILLOW: ${{ matrix.pillow }}
         run: |
           python3 - <<'PYTHON'
           import os
-          import re
           from pathlib import Path
 
           lock = Path("upstream.lock")
           source = lock.read_text(encoding="utf-8")
-          source = re.sub(r'^version = "3[.]15"$',
-                          'version = "' + os.environ["TRIAL_PYTHON_VERSION"] + '"', source, flags=re.M)
-          source = source.replace("python:3.15.2-slim-bookworm", os.environ["TRIAL_PYTHON_IMAGE"])
+          source = source.replace('pillow = "13.0.0"', 'pillow = "' + os.environ["TRIAL_PILLOW"] + '"')
           lock.write_text(source, encoding="utf-8")
           PYTHON
       - name: Build the pinned release environment

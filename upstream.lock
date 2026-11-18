@@ -13,13 +13,12 @@ schema = 1
 # (tools/build_release.py, tools/voxel_precompile.py refuse any other): the
 # generators' output depends on the interpreter (set order, float sums), and
 # the players' builders only replay it. This fork-only experiment compares
-# Python 3.15 with the release baseline. The web builder still uses Pyodide.
+# Pillow 12.3 and 13 on Python 3.15. The web builder still uses Pyodide.
 [python]
 version = "3.15"
-# what tools/release_env builds its image with (pillow: the one the voxel
-# data was proven with; any 11.x/12.x gave the same bytes)
+# The release environment installs this Python image and Pillow version.
 image = "python:3.15.2-slim-bookworm"
-pillow = "12.3.0"
+pillow = "13.0.0"
 
 # The release environment (tools/docker_release.py): devkitARM and libctru,
 # citro2d, citro3d as one image, by digest.
