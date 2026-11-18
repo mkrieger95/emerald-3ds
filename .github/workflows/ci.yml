@@ -87,12 +87,39 @@ jobs:
         run: python 3ds_port/tests/bottom_map_test.py
 
   build-3ds:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: baseline
+            python-version: "3.13"
+            python-image: python:3.13.17-slim-bookworm
+          - name: candidate
+            python-version: "3.15"
+            python-image: python:3.15.2-slim-bookworm
     # Not ubuntu-latest: on Ubuntu 26.04 the container's AddressSanitizer
     # builds (pokedex_capture_test.py --sanitize) loop on DEADLYSIGNAL until
     # the runner is lost.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Select the comparison interpreter
+        env:
+          TRIAL_PYTHON_VERSION: ${{ matrix.python-version }}
+          TRIAL_PYTHON_IMAGE: ${{ matrix.python-image }}
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          import re
+          from pathlib import Path
+
+          lock = Path("upstream.lock")
+          source = lock.read_text(encoding="utf-8")
+          source = re.sub(r'^version = "3[.]15"$',
+                          'version = "' + os.environ["TRIAL_PYTHON_VERSION"] + '"', source, flags=re.M)
+          source = source.replace("python:3.15.2-slim-bookworm", os.environ["TRIAL_PYTHON_IMAGE"])
+          lock.write_text(source, encoding="utf-8")
+          PYTHON
       - name: Build the pinned release environment
         id: release-image
         run: |
@@ -135,9 +162,56 @@ jobs:
           # In payload/, where the release ships them (release_audit_allow.toml [large]).
           python3 -c "import zipfile,pathlib; z=zipfile.ZipFile('ship.zip','w'); [z.write(p, 'payload/' + p.name) for p in pathlib.Path('ship').iterdir()]"
           python3 tools/release_audit.py --zip ship.zip --strict
+          (
+            cd build/upstream/3ds_port/romfs
+            find voxel -type f -print0 | sort -z | xargs -0 sha256sum
+          ) > voxel.sha256
           echo "::endgroup::"
           BUILD
       - uses: actions/upload-artifact@v4
         with:
-          name: emerald3ds-engine
+          name: emerald3ds-engine-${{ matrix.name }}
           path: ship/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voxel-checksums-${{ matrix.name }}
+          path: voxel.sha256
+          if-no-files-found: error
+
+  compare-voxel-output:
+    needs: build-3ds
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: voxel-checksums-baseline
+          path: baseline
+      - uses: actions/download-artifact@v4
+        with:
+          name: voxel-checksums-candidate
+          path: candidate
+      - name: Compare generated voxel file hashes
+        run: diff -u baseline/voxel.sha256 candidate/voxel.sha256
+
+  windows-builder-smoke:
+    needs: release-versions
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: builder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ needs.release-versions.outputs.python }}
+      - name: Install builder packaging tools
+        env:
+          PILLOW: ${{ needs.release-versions.outputs.pillow }}
+        run: python -m pip install "Pillow==$env:PILLOW" "PyInstaller==6.22.3"
+      - name: Freeze the Windows builder
+        run: |
+          New-Item -ItemType Directory -Force build | Out-Null
+          python -c "import sys; from pathlib import Path; sys.path.insert(0, '../tools'); from build_release import GENERATORS, local_closure; _, external = local_closure(Path('../3ds_port/scripts'), GENERATORS); Path('build/hidden-imports.txt').write_text('\n'.join(sorted(external)), encoding='utf-8')"
+          python -m PyInstaller --noconfirm --clean emerald3ds-builder.spec
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\dist\Emerald3DS-Builder\emerald3ds-builder-cli.exe --help
