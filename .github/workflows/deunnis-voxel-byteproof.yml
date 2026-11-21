@@ -1,0 +1,88 @@
+name: Deunnis voxel rescue deep byte and pixel verification
+
+on:
+  push:
+    branches:
+      - qa/deunnis-voxel-rescue-byteproof-206-210
+
+permissions:
+  contents: read
+
+jobs:
+  byte-and-pixel-proofs:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Use pinned Emerald3DS release environment
+        id: release-image
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          import tomllib
+          from pathlib import Path
+          from tools.docker_release import image
+          lock = tomllib.loads(Path("upstream.lock").read_text(encoding="utf-8"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              print("tag=" + image(lock), file=f)
+          PYTHON
+      - name: Generate twice, compare bytes and audit exact room pixels
+        env:
+          RELEASE_IMAGE: ${{ steps.release-image.outputs.tag }}
+        run: |
+          docker run --rm -i --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "$GITHUB_WORKSPACE:/work" -w /work "$RELEASE_IMAGE" bash -euo pipefail <<'VERIFY'
+          mkdir -p verification/first verification/second verification/reports
+          python3 -m py_compile tools/port_common/gen_asset_table.py
+          python3 tools/bootstrap.py --make -j4 --python python3 > verification/reports/bootstrap.log 2>&1
+          python3 3ds_port/scripts/voxel_status.py --check > verification/reports/status.log 2>&1
+          cd build/upstream/3ds_port
+          python3 scripts/gen_voxel_buildings.py --verify --diagnostics failures \
+            --output /work/verification/first/buildings.bin > /work/verification/reports/pass1.log 2>&1
+          python3 scripts/gen_voxel_buildings.py --verify --diagnostics failures \
+            --output /work/verification/second/buildings.bin > /work/verification/reports/pass2.log 2>&1
+          cmp /work/verification/first/buildings.bin /work/verification/second/buildings.bin
+          cmp /work/verification/first/windowlights.bin /work/verification/second/windowlights.bin
+          sha256sum /work/verification/first/buildings.bin \
+                    /work/verification/first/windowlights.bin \
+                    /work/verification/second/buildings.bin \
+                    /work/verification/second/windowlights.bin \
+                    > /work/verification/reports/sha256sums.txt
+          python3 scripts/voxel_engine_view.py check > /work/verification/reports/engine_check.log 2>&1
+          python3 - <<'PYTHON'
+          import re
+          from pathlib import Path
+          logs = [Path("/work/verification/reports/pass1.log"),
+                  Path("/work/verification/reports/pass2.log")]
+          results = []
+          for path in logs:
+              content = path.read_text(encoding="utf-8", errors="replace")
+              room = re.findall(r"^room\s+.+?:\s*(\d+) pixel\(s\) differ", content, re.M)
+              if not room:
+                  # The room names are padded; tolerate the report's natural line format.
+                  room = re.findall(r"^room\s+.+?\s+(?:composed with the terrain|in its state \d+):\s*(\d+) pixel\(s\) differ", content, re.M)
+              if not room:
+                  raise SystemExit(f"{path}: no individual room pixel proof records found")
+              if any(int(x) for x in room):
+                  raise SystemExit(f"{path}: nonzero room pixel mismatch found")
+              lint = re.search(r"interior lint:\s*(\d+) room\(s\),\s*(\d+) failure\(s\)", content)
+              if not lint or int(lint.group(2)) != 0:
+                  raise SystemExit(f"{path}: interior lint not clean")
+              results.append((len(room), int(lint.group(1))))
+          Path("/work/verification/reports/summary.txt").write_text(
+              f"PASS: identical buildings.bin and windowlights.bin across two complete runs\n"
+              f"PASS: zero GBA-projection pixel differences in each reported room/state\n"
+              f"PASS: zero interior lint failures\n"
+              f"Run 1: {results[0][0]} room/state records, {results[0][1]} linted rooms\n"
+              f"Run 2: {results[1][0]} room/state records, {results[1][1]} linted rooms\n"
+              f"Source provenance: Deunnis originals #206, #207, #208, #210\n",
+              encoding="utf-8")
+          PYTHON
+          VERIFY
+      - name: Upload checksums and verification logs only (not game assets)
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: deunnis-voxel-byteproof
+          path: verification/reports/
+          if-no-files-found: warn
